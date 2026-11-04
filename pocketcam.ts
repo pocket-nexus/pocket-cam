@@ -7,6 +7,7 @@ const USAGE = `usage:
   bun pocketcam.ts clip <name> <seconds> [--back 0]
   bun pocketcam.ts rec <name> [--pre 0.5] [--post 1] -- <command> [args...]
   bun pocketcam.ts mark <label>
+  bun pocketcam.ts ui                     # open the control page in the browser
   bun pocketcam.ts status | log [lines] | latency <ms> | quit | build`;
 import { $ } from "bun";
 import { existsSync, statSync } from "node:fs";
@@ -60,12 +61,14 @@ function epoch(s: string): number {
   return t / 1000;
 }
 
+// requests that change the recorder's state are POSTs; /status and /clips are GETs
+const READS = new Set(["/status", "/clips"]);
 async function api(path: string, q: Record<string, unknown> = {}) {
   const u = new URL(path, BASE);
   for (const [k, v] of Object.entries(q)) if (v !== undefined && v !== false) u.searchParams.set(k, String(v));
   let r: Response;
   try {
-    r = await fetch(u);
+    r = await fetch(u, { method: READS.has(path) ? "GET" : "POST" });
   } catch {
     console.error(`pocketcamd is not running on ${BASE}. Start it with: bun ${DIR}/pocketcam.ts serve`);
     process.exit(1);
@@ -82,13 +85,16 @@ async function alive() {
   try { return (await fetch(`${BASE}/status`)).ok; } catch { return false; }
 }
 
-// Rebuilding changes the ad-hoc signature, and macOS asks for the camera again.
+// An ad-hoc signature changes with every build, and macOS asks for the camera
+// again after each one. Signing with a certificate (POCKETCAM_SIGN_IDENTITY,
+// a name from `security find-identity -v -p codesigning`) keeps the permission.
+const SIGN = process.env.POCKETCAM_SIGN_IDENTITY || "-";
 async function build() {
   if (existsSync(BIN) && statSync(BIN).mtimeMs >= statSync(SRC).mtimeMs) return;
   await $`mkdir -p ${APP}/Contents/MacOS`;
   await Bun.write(`${APP}/Contents/Info.plist`, INFO_PLIST);
   await $`xcrun swiftc -O -swift-version 5 -o ${BIN} ${SRC}`.quiet();
-  await $`codesign --force --sign - ${APP}`.quiet();
+  await $`codesign --force --sign ${SIGN} ${APP}`.quiet();
 }
 
 function printClip(j: any) {
@@ -108,13 +114,17 @@ switch (cmd) {
   case "serve": {
     if (await alive()) { console.log("pocketcamd is already running"); console.log(await api("/status")); break; }
     await build();
-    await $`open -n ${APP} --args --port ${PORT} --log ${LOG} ${rest}`;
+    await $`open -n ${APP} --args --port ${PORT} --log ${LOG} --web ${DIR}/web ${rest}`;
     console.error("waiting for the camera (the first start asks for camera and microphone access)…");
     const t0 = Date.now();
     while (Date.now() - t0 < 90000) {
       if (await alive()) {
         const s = await api("/status");
-        if (s.fps_measured) { console.log(s); process.exit(0); }
+        if (s.fps_measured) {
+          console.log(`${s.camera}: ${s.source} at ${s.fps_measured} fps, clips → ${s.dir}`);
+          console.log(`control page: ${BASE}/`);
+          process.exit(0);
+        }
       }
       await Bun.sleep(300);
     }
@@ -129,8 +139,7 @@ switch (cmd) {
   }
 
   case "stop": {
-    const at = f.at ? epoch(f.at) : f.after ? Date.now() / 1000 + Number(f.after) : undefined;
-    printClip(await api("/stop", { at, back: f.back }));
+    printClip(await api("/stop", { at: f.at && epoch(f.at), back: f.back, after: f.after }));
     break;
   }
 
@@ -147,7 +156,7 @@ switch (cmd) {
     await api("/start", { name, back: f.pre });
     const p = Bun.spawn(f.cmd, { stdio: ["inherit", "inherit", "inherit"] });
     const code = await p.exited;
-    printClip(await api("/stop", { at: Date.now() / 1000 + Number(f.post ?? 0) }));
+    printClip(await api("/stop", { after: f.post }));
     process.exit(code);
   }
 
@@ -157,6 +166,10 @@ switch (cmd) {
 
   case "latency":
     console.log(await api("/latency", { ms: f._[0] }));
+    break;
+
+  case "ui":
+    await $`open ${BASE}/`;
     break;
 
   case "status":

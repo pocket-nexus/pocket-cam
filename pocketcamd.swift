@@ -13,6 +13,7 @@
 // the camera permission of the app that launched it, and an app signed
 // without the camera entitlement is refused without a prompt.
 import AVFoundation
+import CoreImage
 import CoreMedia
 import Foundation
 import Network
@@ -38,6 +39,7 @@ let outDir = URL(fileURLWithPath: (opt("--dir", "~/Downloads/pocketcam") as NSSt
 var latency = (Double(opt("--latency-ms", "0")) ?? 0) / 1000
 let deviceMatch = opt("--device", "Osmo")
 let withAudio = !argv.contains("--no-audio")
+let webDir = opt("--web", "")  // folder holding index.html, read on every request
 let FD = 1 / fps
 
 let codecs: [String: CMVideoCodecType] = [
@@ -156,6 +158,23 @@ var lastCaptureT = 0.0
 var srcDims = CMVideoDimensions(width: 0, height: 0)
 var srcSubtype = ""
 var vt: VTCompressionSession?
+// preview requests wait for the next captured frame; no frame is held between requests
+var previewWaiters: [(NWConnection, Int)] = []
+let pq = DispatchQueue(label: "pocketcam.preview")
+let ciContext = CIContext()
+
+func renderPreview(_ pb: CVPixelBuffer, _ waiters: [(NWConnection, Int)]) {
+  let img = CIImage(cvPixelBuffer: pb)
+  for (c, w) in waiters {
+    let s = CGFloat(w) / img.extent.width
+    let scaled = img.transformed(by: CGAffineTransform(scaleX: s, y: s))
+    guard let cs = CGColorSpace(name: CGColorSpace.sRGB),
+          let jpg = ciContext.jpegRepresentation(of: scaled, colorSpace: cs, options: [
+            CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String): 0.75,
+          ]) else { respond(c, 500, ["error": "preview failed"]); continue }
+    respondData(c, 200, "image/jpeg", jpg)
+  }
+}
 
 // MARK: clip
 
@@ -443,6 +462,11 @@ final class Capture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, AVC
       guard status == noErr, let out else { sq.async { encodeErrors += 1 }; return }
       sq.async { onEncoded(out) }
     }
+    if !previewWaiters.isEmpty {
+      let ws = previewWaiters
+      previewWaiters = []
+      pq.async { renderPreview(pb, ws) }
+    }
   }
 
   func captureOutput(_ o: AVCaptureOutput, didDrop sb: CMSampleBuffer, from c: AVCaptureConnection) {
@@ -488,17 +512,36 @@ log("\(dev.localizedName): \(describe(format)) @ \(fps) fps, audio: \(audioDev?.
 
 // MARK: HTTP control
 
-func respond(_ c: NWConnection, _ code: Int, _ obj: Any) {
-  let body = (try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys])) ?? Data()
-  let head = "HTTP/1.1 \(code) \(code == 200 ? "OK" : "Error")\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n"
+func respondData(_ c: NWConnection, _ code: Int, _ type: String, _ body: Data) {
+  let head = "HTTP/1.1 \(code) \(code == 200 ? "OK" : "Error")\r\nContent-Type: \(type)\r\nContent-Length: \(body.count)\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
   c.send(content: head.data(using: .utf8)! + body, completion: .contentProcessed { _ in c.cancel() })
 }
 
-// a time named by the request: `at` (wall-clock epoch seconds) or `back`
-// (seconds before the request arrived); default the arrival itself
+func respond(_ c: NWConnection, _ code: Int, _ obj: Any) {
+  let body = (try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys])) ?? Data()
+  respondData(c, code, "application/json", body)
+}
+
+// a time named by the request: `at` (wall-clock epoch seconds), or the
+// arrival moved by `back` (seconds earlier) and `after` (seconds later)
 func requestTime(_ q: [String: String], _ arrival: Double) -> Double {
   if let a = q["at"], let w = Double(a) { return wallToHost(w) }
-  return arrival - (Double(q["back"] ?? "0") ?? 0)
+  return arrival - (Double(q["back"] ?? "0") ?? 0) + (Double(q["after"] ?? "0") ?? 0)
+}
+
+// clips on disk, newest first, from their JSON sidecars
+func listClips() -> [[String: Any]] {
+  let fm = FileManager.default
+  guard let items = try? fm.contentsOfDirectory(at: outDir, includingPropertiesForKeys: [.contentModificationDateKey]) else { return [] }
+  return items.filter { $0.pathExtension == "json" }
+    .compactMap { u -> (Date, [String: Any])? in
+      guard fm.fileExists(atPath: u.deletingPathExtension().appendingPathExtension("mov").path),
+            let d = try? Data(contentsOf: u),
+            let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return nil }
+      return ((try? u.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast, o)
+    }
+    .sorted { $0.0 > $1.0 }
+    .prefix(50).map { $0.1 }
 }
 
 func clipURL(_ raw: String?) -> (String, URL) {
@@ -528,6 +571,10 @@ func status() -> [String: Any] {
     "ring_mb": ringBytes / 1_000_000, "latency_ms": latency * 1000, "dir": outDir.path,
     "audio": audioDev?.localizedName ?? "off",
   ]
+  let volume = FileManager.default.fileExists(atPath: outDir.path) ? outDir : outDir.deletingLastPathComponent()
+  if let free = try? volume.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage {
+    o["disk_free_gb"] = r3(Double(free) / 1e9)
+  }
   if vring.count > 30 {
     let n = vring.count - 1
     o["fps_measured"] = r3(Double(n) / (vring.last!.t - vring.first!.t))
@@ -575,6 +622,18 @@ func route(_ conn: NWConnection, _ path: String, _ q: [String: String], _ arriva
   case "/latency":
     if let s = q["ms"], let ms = Double(s) { latency = ms / 1000 }
     respond(conn, 200, ["latency_ms": latency * 1000])
+  case "/clips":
+    respond(conn, 200, listClips())
+  case "/reveal":
+    // only a clip in the output folder, shown in Finder
+    let url = outDir.appendingPathComponent((q["name"] ?? "") + ".mov").standardizedFileURL
+    guard url.deletingLastPathComponent() == outDir.standardizedFileURL,
+          FileManager.default.fileExists(atPath: url.path) else { respond(conn, 404, ["error": "no such clip"]); return }
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+    p.arguments = ["-R", url.path]
+    try? p.run()
+    respond(conn, 200, ["revealed": url.path])
   case "/quit":
     respond(conn, 200, ["quit": true])
     if let c = clip, !c.finishing {
@@ -584,7 +643,8 @@ func route(_ conn: NWConnection, _ path: String, _ q: [String: String], _ arriva
       sq.asyncAfter(deadline: .now() + 0.2) { exit(0) }
     }
   default:
-    respond(conn, 404, ["error": "unknown path \(path)", "paths": ["/status", "/start", "/stop", "/mark", "/latency", "/quit"]])
+    respond(conn, 404, ["error": "unknown path \(path)",
+                        "paths": ["/", "/status", "/clips", "/preview.jpg", "/start", "/stop", "/mark", "/reveal", "/latency", "/quit"]])
   }
 }
 
@@ -597,15 +657,49 @@ listener.newConnectionHandler = { conn in
   conn.start(queue: hq)
   conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, _, _ in
     let arrival = hostNow()
-    guard let data, let s = String(data: data, encoding: .utf8),
-          let line = s.components(separatedBy: "\r\n").first else { conn.cancel(); return }
-    let parts = line.split(separator: " ")
+    guard let data, let s = String(data: data, encoding: .utf8) else { conn.cancel(); return }
+    let lines = s.components(separatedBy: "\r\n")
+    let parts = lines[0].split(separator: " ")
     guard parts.count >= 2, let comps = URLComponents(string: "http://h" + parts[1]) else {
       respond(conn, 400, ["error": "bad request"]); return
     }
+    var headers: [String: String] = [:]
+    for l in lines.dropFirst() {
+      if l.isEmpty { break }
+      if let i = l.firstIndex(of: ":") {
+        headers[l[..<i].lowercased()] = l[l.index(after: i)...].trimmingCharacters(in: .whitespaces)
+      }
+    }
+    // A web page on another site can make the browser send requests here, and
+    // a rebound DNS name can make them look same-origin: only this host's own
+    // names are accepted, and anything that changes state must be a POST.
+    let hosts = ["127.0.0.1:\(port)", "localhost:\(port)"]
+    if let h = headers["host"], !hosts.contains(h) { respond(conn, 403, ["error": "host \(h) not allowed"]); return }
+    if let o = headers["origin"], !hosts.map({ "http://" + $0 }).contains(o) {
+      respond(conn, 403, ["error": "origin \(o) not allowed"]); return
+    }
+    let path = comps.path
+    let changes: Set<String> = ["/start", "/stop", "/mark", "/reveal", "/latency", "/quit"]
+    if changes.contains(path) && parts[0] != "POST" { respond(conn, 405, ["error": "\(path) takes POST"]); return }
+    // form encoding: browsers and URLSearchParams write a space as "+"
     var q: [String: String] = [:]
-    for i in comps.queryItems ?? [] { q[i.name] = i.value ?? "" }
-    sq.async { route(conn, comps.path, q, arrival) }
+    for i in comps.percentEncodedQueryItems ?? [] {
+      let v = (i.value ?? "").replacingOccurrences(of: "+", with: " ")
+      q[i.name] = v.removingPercentEncoding ?? v
+    }
+    switch path {
+    case "/", "/index.html":
+      if !webDir.isEmpty, let html = FileManager.default.contents(atPath: webDir + "/index.html") {
+        respondData(conn, 200, "text/html; charset=utf-8", html)
+      } else {
+        respond(conn, 404, ["error": "no web page; start with `bun pocketcam.ts serve`, which passes --web"])
+      }
+    case "/preview.jpg":
+      let w = min(max(Int(q["w"] ?? "960") ?? 960, 160), 1920)
+      cq.async { previewWaiters.append((conn, w)) }
+    default:
+      sq.async { route(conn, path, q, arrival) }
+    }
   }
 }
 listener.stateUpdateHandler = { st in

@@ -21,6 +21,19 @@ bun pocketcam.ts clip intro 8 # record 8 seconds from now: 240 frames
 
 On the first start macOS asks for camera and microphone access for Pocket Cam. Clips go to `~/Downloads/pocketcam/<name>.mov`, each with a `<name>.json` beside it.
 
+## Control page
+
+`bun pocketcam.ts ui` opens `http://127.0.0.1:7790/`, a page served by the recorder for starting and stopping clips by hand:
+
+- A live picture from the camera, about 4 pictures a second at 960 pixels wide, with a recording badge, the clip's running time and its frame count.
+- The clip name. An empty name gives the date and time; a name already taken gets `-2`, `-3` and so on, so repeated takes can share one name.
+- **Start earlier by** 0 to 3 s: the clip begins that long before the click, from the frames already in memory, to cover the time it takes to react. **Stop later by** 0 to 2 s: the clip ends that long after the stop click.
+- One button, or <kbd>Space</kbd>, starts and stops. <kbd>M</kbd> or the Mark button records a labelled moment in the clip's JSON.
+- The clips in the output folder, newest first, with length, frame count, size, lost frames and marks, and a button that shows the file in Finder.
+- The frame rate, frames lost since the recorder started, and the free disk space with the minutes of recording it holds at the current bitrate.
+
+The page keeps its settings in the browser's local storage.
+
 ## Commands
 
 ```sh
@@ -31,7 +44,7 @@ bun pocketcam.ts start [name] --at 2026-11-05T10:00:00+08:00 --duration 5
 bun pocketcam.ts mark "store opens"                   # a labelled time inside the clip
 bun pocketcam.ts stop [--after 1]                     # stop now, or 1 s from now
 bun pocketcam.ts rec <name> --pre 0.5 --post 1 -- bun drive-device.ts
-bun pocketcam.ts status | log | latency <ms> | quit
+bun pocketcam.ts ui | status | log | latency <ms> | quit
 ```
 
 `rec` starts a clip, runs the command, and stops the clip when the command exits.
@@ -49,16 +62,22 @@ bun pocketcam.ts status | log | latency <ms> | quit
 
 ## HTTP control
 
-The recorder listens on `http://127.0.0.1:7790` (`POCKETCAM_PORT` changes it). Every command above is a GET request:
+The recorder listens on `http://127.0.0.1:7790` (`POCKETCAM_PORT` changes it). Requests that change its state are POSTs, for example `curl -X POST '127.0.0.1:7790/start?name=intro&back=1'`:
 
-| Path | Parameters |
-| --- | --- |
-| `/start` | `name`, `back` (s), `at` (epoch s), `duration` (s), `wait=1` (answer when the file is written) |
-| `/stop` | `back`, `at`; answers when the file is written |
-| `/mark` | `label`, `back`, `at` |
-| `/status` | |
-| `/latency` | `ms` |
-| `/quit` | |
+| Method | Path | Parameters |
+| --- | --- | --- |
+| POST | `/start` | `name`, `back` (s), `after` (s), `at` (epoch s), `duration` (s), `wait=1` (answer when the file is written) |
+| POST | `/stop` | `back`, `after`, `at`; answers when the file is written |
+| POST | `/mark` | `label`, `back`, `at` |
+| POST | `/reveal` | `name`: show the clip in Finder |
+| POST | `/latency` | `ms` |
+| POST | `/quit` | |
+| GET | `/status` | |
+| GET | `/clips` | the clips in the output folder, newest first |
+| GET | `/preview.jpg` | `w` (160 to 1920): a JPEG of the next frame |
+| GET | `/` | the control page |
+
+Requests are accepted only with `Host` `127.0.0.1:7790` or `localhost:7790`, and with no `Origin` or one of those two. A page on another site can make a browser send requests to this port, and a rebound DNS name can make them look same-origin; these checks and the POST rule keep such pages from starting recordings.
 
 The answer to `/stop` is the clip's JSON:
 
@@ -101,7 +120,7 @@ Measured on 2026-11-05:
 
 ## Camera permission
 
-macOS grants camera access to the app responsible for a process, usually the terminal or editor that launched it. An app signed with the hardened runtime and without the `com.apple.security.device.camera` entitlement is refused without a prompt, and a recorder started from it gets no frames. Pocket Cam therefore runs as its own app, `build/PocketCam.app`, which declares its camera and microphone use, and macOS asks for Pocket Cam itself. The app is signed ad hoc, so macOS asks again after each rebuild.
+macOS grants camera access to the app responsible for a process, usually the terminal or editor that launched it. An app signed with the hardened runtime and without the `com.apple.security.device.camera` entitlement is refused without a prompt, and a recorder started from it gets no frames. Pocket Cam therefore runs as its own app, `build/PocketCam.app`, which declares its camera and microphone use, and macOS asks for Pocket Cam itself. The app is signed ad hoc by default, and an ad-hoc signature changes with every build, so macOS asks again after each rebuild. To keep the permission across builds, sign with a certificate: `POCKETCAM_SIGN_IDENTITY="<name from security find-identity -v -p codesigning>" bun pocketcam.ts serve`.
 
 ## Not measured yet
 

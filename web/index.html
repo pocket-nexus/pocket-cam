@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pocket Cam</title>
+<style>
+  :root {
+    --bg: #111214; --panel: #1a1c1f; --line: #2a2d31; --text: #e9e9eb; --dim: #9a9ca3;
+    --rec: #e5484d; --rec-dim: #3b1d1f; --ok: #46a758; --warn: #f5a524; --accent: #8e8cf0;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg: #f4f4f5; --panel: #ffffff; --line: #e1e1e4; --text: #18181b; --dim: #6b6b74;
+            --rec-dim: #fde8e8; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif; }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 12px 16px;
+           border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  .pills { display: flex; flex-wrap: wrap; gap: 6px; color: var(--dim); font-size: 12px; }
+  .pill { padding: 2px 8px; border: 1px solid var(--line); border-radius: 999px; white-space: nowrap; }
+  .pill.bad { color: var(--warn); border-color: var(--warn); }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--dim); margin-right: 6px; vertical-align: 0; }
+  .dot.on { background: var(--ok); }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 16px; padding: 16px; max-width: 1400px; margin: 0 auto; }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+  .stage { position: relative; background: #000; border-radius: 10px; overflow: hidden; aspect-ratio: 16 / 9; }
+  .stage img { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .stage .off { position: absolute; inset: 0; display: grid; place-items: center; color: #8a8a90; font-size: 13px; }
+  .badge { position: absolute; top: 12px; left: 12px; display: none; align-items: center; gap: 8px;
+           background: rgba(0,0,0,.65); color: #fff; padding: 6px 10px; border-radius: 8px;
+           font: 600 15px/1 ui-monospace, "SF Mono", Menlo, monospace; }
+  .badge .r { width: 10px; height: 10px; border-radius: 50%; background: var(--rec); animation: blink 1s steps(2) infinite; }
+  .recording .badge { display: flex; }
+  .recording .stage { outline: 3px solid var(--rec); }
+  @keyframes blink { 50% { opacity: .25; } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+  .side { display: flex; flex-direction: column; gap: 14px; }
+  label.f { display: block; color: var(--dim); font-size: 12px; margin-bottom: 4px; }
+  input[type=text] { width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line);
+                     background: var(--bg); color: var(--text); font: inherit; }
+  .seg { display: flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .seg button { flex: 1; padding: 6px 0; border: 0; background: transparent; color: var(--text); font: inherit; cursor: pointer; }
+  .seg button + button { border-left: 1px solid var(--line); }
+  .seg button.sel { background: var(--accent); color: #fff; }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  #rec { width: 100%; padding: 16px; border-radius: 12px; border: 0; cursor: pointer; font: 600 17px/1 inherit;
+         font-family: inherit; background: var(--rec); color: #fff; display: flex; align-items: center; justify-content: center; gap: 10px; }
+  #rec .ico { width: 14px; height: 14px; border-radius: 50%; background: #fff; }
+  .recording #rec { background: var(--rec-dim); color: var(--rec); border: 2px solid var(--rec); }
+  .recording #rec .ico { border-radius: 2px; background: var(--rec); }
+  #rec:disabled { opacity: .5; cursor: default; }
+  .hint { color: var(--dim); font-size: 12px; margin-top: 8px; text-align: center; }
+  kbd { font: 11px ui-monospace, Menlo, monospace; border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+  .markrow { display: flex; gap: 8px; }
+  .markrow button, .small { padding: 8px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg);
+                            color: var(--text); font: inherit; cursor: pointer; white-space: nowrap; }
+  .markrow button:disabled { opacity: .5; cursor: default; }
+  .clips { grid-column: 1 / -1; }
+  .clips h2 { font-size: 13px; margin: 0 0 8px; color: var(--dim); font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 8px; border-top: 1px solid var(--line); }
+  th { color: var(--dim); font-weight: 500; border-top: 0; }
+  td.num { font-variant-numeric: tabular-nums; }
+  .warn { color: var(--warn); }
+  .empty { color: var(--dim); padding: 8px; }
+  #toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); background: var(--panel);
+           border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; box-shadow: 0 8px 30px rgba(0,0,0,.35);
+           display: none; max-width: calc(100% - 32px); }
+  #toast.err { border-color: var(--rec); color: var(--rec); }
+  #down { display: none; margin: 16px; padding: 12px 14px; border: 1px solid var(--warn); border-radius: 10px; color: var(--warn); }
+  .down #down { display: block; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Pocket Cam</h1>
+  <div class="pills" id="pills"><span class="pill"><span class="dot" id="dot"></span><span id="cam">connecting…</span></span></div>
+</header>
+<div id="down">The recorder is not answering. Start it with <code>bun pocketcam.ts serve</code>; this page reconnects by itself.</div>
+<main>
+  <section>
+    <div class="stage">
+      <img id="preview" alt="Live picture from the camera">
+      <div class="off" id="off">Preview off</div>
+      <div class="badge"><span class="r"></span><span id="timer">0:00.0</span><span id="frames" style="opacity:.7;font-weight:500"></span></div>
+    </div>
+    <label style="display:flex;gap:6px;align-items:center;margin-top:8px;color:var(--dim);font-size:12px">
+      <input type="checkbox" id="live" checked> Live preview (about 4 pictures a second, 960 wide)
+    </label>
+  </section>
+
+  <aside class="side">
+    <div class="panel">
+      <label class="f" for="name">Clip name (empty: date and time; a taken name gets -2, -3…)</label>
+      <input type="text" id="name" placeholder="e.g. store-open" autocomplete="off" spellcheck="false">
+      <div class="row2" style="margin-top:12px">
+        <div><label class="f">Start earlier by</label><div class="seg" id="pre"></div></div>
+        <div><label class="f">Stop later by</label><div class="seg" id="post"></div></div>
+      </div>
+      <div style="margin-top:14px">
+        <button id="rec" disabled><span class="ico"></span><span id="recLabel">Record</span></button>
+        <div class="hint"><kbd>Space</kbd> starts and stops · <kbd>M</kbd> marks</div>
+      </div>
+    </div>
+    <div class="panel">
+      <label class="f" for="mark">Mark a moment in the clip</label>
+      <div class="markrow">
+        <input type="text" id="mark" placeholder="label (optional)" autocomplete="off">
+        <button id="markBtn" disabled>Mark</button>
+      </div>
+      <div id="marks" style="margin-top:8px;color:var(--dim);font-size:12px"></div>
+    </div>
+  </aside>
+
+  <section class="panel clips">
+    <h2>Clips in <span id="dir"></span></h2>
+    <table>
+      <thead><tr><th>Name</th><th>Length</th><th>Frames</th><th>Started</th><th>Size</th><th>Notes</th><th></th></tr></thead>
+      <tbody id="list"><tr><td colspan="7" class="empty">No clips yet.</td></tr></tbody>
+    </table>
+  </section>
+</main>
+<div id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const store = {
+  get(k, d) { try { const v = localStorage.getItem("pocketcam." + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem("pocketcam." + k, JSON.stringify(v)); } catch {} },
+};
+
+let status = null;      // last /status
+let phase = "idle";     // idle | starting | recording | stopping
+let turn = 0;           // bumped on every start/stop, so a status asked for before it is dropped
+let pre = store.get("pre", 1), post = store.get("post", 0.5);
+
+async function call(path, params = {}, method = "GET") {
+  const u = new URL(path, location.origin);
+  for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== "" && v !== null) u.searchParams.set(k, v);
+  const r = await fetch(u, { method });
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+  return j;
+}
+
+function toast(msg, err = false) {
+  const t = $("toast");
+  t.textContent = msg; t.className = err ? "err" : ""; t.style.display = "block";
+  clearTimeout(toast.h); toast.h = setTimeout(() => (t.style.display = "none"), err ? 6000 : 3500);
+}
+
+function seg(el, values, current, unit, onPick) {
+  el.innerHTML = "";
+  for (const v of values) {
+    const b = document.createElement("button");
+    b.textContent = v + unit; b.className = v === current ? "sel" : "";
+    b.onclick = () => { onPick(v); seg(el, values, v, unit, onPick); };
+    el.appendChild(b);
+  }
+}
+seg($("pre"), [0, 1, 2, 3], pre, " s", (v) => { pre = v; store.set("pre", v); });
+seg($("post"), [0, 0.5, 1, 2], post, " s", (v) => { post = v; store.set("post", v); });
+$("name").value = store.get("name", "");
+$("name").oninput = () => store.set("name", $("name").value);
+
+function fmtTime(s) {
+  if (!isFinite(s) || s < 0) s = 0;
+  const m = Math.floor(s / 60), r = s - m * 60;
+  return `${m}:${r.toFixed(1).padStart(4, "0")}`;
+}
+function fmtSize(b) { return b > 1e9 ? (b / 1e9).toFixed(2) + " GB" : (b / 1e6).toFixed(0) + " MB"; }
+function clock(iso) { const d = new Date(iso); return isNaN(d) ? "" : d.toLocaleTimeString([], { hour12: false }); }
+
+function render() {
+  const s = status, up = !!s;
+  document.body.classList.toggle("down", !up);
+  document.body.classList.toggle("recording", phase === "recording" || phase === "stopping");
+  $("dot").className = "dot" + (up && s.fps_measured ? " on" : "");
+  const pills = $("pills");
+  while (pills.children.length > 1) pills.lastChild.remove();
+  if (up) {
+    $("cam").textContent = `${s.camera} · ${s.source}`;
+    const add = (text, bad) => { const p = document.createElement("span"); p.className = "pill" + (bad ? " bad" : ""); p.textContent = text; pills.appendChild(p); };
+    add(`${s.fps_measured ? s.fps_measured.toFixed(2) : "–"} fps`, s.fps_measured && Math.abs(s.fps_measured - 30) > 0.5);
+    add(`${s.capture_gaps + s.capture_drops} frames lost since start`, s.capture_gaps + s.capture_drops > 0);
+    add(`${s.codec}`);
+    const rate = s.ring_s > 0 ? s.ring_mb / s.ring_s : 0;   // MB per second
+    if (s.disk_free_gb != null) add(`${s.disk_free_gb.toFixed(0)} GB free${rate ? ` · ~${Math.floor(s.disk_free_gb * 1000 / rate / 60)} min` : ""}`, s.disk_free_gb < 20);
+    if (s.latency_ms) add(`latency ${s.latency_ms} ms`);
+    $("dir").textContent = s.dir;
+  } else {
+    $("cam").textContent = "not connected";
+  }
+  const rec = $("rec");
+  rec.disabled = !up || phase === "starting" || phase === "stopping" || !s.fps_measured;
+  $("recLabel").textContent = { idle: "Record", starting: "Starting…", recording: "Stop", stopping: post ? `Stopping in ${post} s…` : "Saving…" }[phase];
+  $("markBtn").disabled = phase !== "recording";
+  const r = s && s.recording;
+  $("frames").textContent = r && r.frames ? `${r.frames} f` : "";
+  const ms = $("marks");
+  ms.textContent = r && r.marks ? r.marks.map((m) => `${m.offset_s != null ? m.offset_s.toFixed(1) + " s" : "?"} ${m.label}`).join(" · ") : "";
+}
+
+// timer: from the clip's first frame, so a clip started 2 s back reads 0:02.0 at
+// once; a 100 ms interval, because animation frames pause in a window without focus
+setInterval(() => {
+  const r = status && status.recording;
+  const t0 = r ? Date.parse(r.first_frame) : NaN;
+  $("timer").textContent = isNaN(t0) ? "starting" : fmtTime((Date.now() - t0) / 1000);
+}, 100);
+
+async function poll() {
+  const asked = turn;
+  try {
+    const s = await call("/status");
+    if (asked === turn) {
+      status = s;
+      // a clip started or stopped elsewhere (the command line, another tab)
+      if (phase === "idle" && s.recording) phase = "recording";
+      if (phase === "recording" && !s.recording) { phase = "idle"; loadClips(); }
+    }
+  } catch { status = null; }
+  render();
+  setTimeout(poll, 400);
+}
+
+async function toggle() {
+  if (phase === "idle") {
+    turn++; phase = "starting"; render();
+    try {
+      const j = await call("/start", { name: $("name").value.trim(), back: pre || undefined }, "POST");
+      turn++; phase = "recording";
+      status = { ...status, recording: j };
+    } catch (e) { phase = "idle"; toast(e.message, true); }
+    render();
+  } else if (phase === "recording") {
+    turn++; phase = "stopping"; render();
+    try {
+      const j = await call("/stop", { after: post || undefined }, "POST");
+      const miss = j.missing_frames ? ` · ${j.missing_frames.length} gap(s) with lost frames` : "";
+      toast(`Saved ${j.name}.mov · ${j.duration_s.toFixed(2)} s · ${j.frames} frames${miss}`, !!j.missing_frames);
+    } catch (e) { toast(e.message, true); }
+    turn++; phase = "idle";
+    if (status) status = { ...status, recording: undefined };
+    render(); loadClips();
+  }
+}
+
+async function mark() {
+  if (phase !== "recording") return;
+  try { await call("/mark", { label: $("mark").value.trim() }, "POST"); $("mark").value = ""; }
+  catch (e) { toast(e.message, true); }
+}
+
+$("rec").onclick = toggle;
+$("markBtn").onclick = mark;
+$("mark").onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); mark(); } };
+document.addEventListener("keydown", (e) => {
+  const typing = e.target instanceof HTMLInputElement && e.target.type === "text";
+  if (e.key === "Escape" && typing) { e.target.blur(); return; }
+  if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.code === "Space") { e.preventDefault(); if (!$("rec").disabled) toggle(); }
+  if (e.key === "m" || e.key === "M") { e.preventDefault(); mark(); }
+});
+
+async function loadClips() {
+  let clips;
+  try { clips = await call("/clips"); } catch { return; }
+  const tb = $("list");
+  tb.innerHTML = "";
+  if (!clips.length) { tb.innerHTML = '<tr><td colspan="7" class="empty">No clips yet.</td></tr>'; return; }
+  for (const c of clips) {
+    const tr = document.createElement("tr");
+    const notes = [];
+    if (c.missing_frames) notes.push(`<span class="warn">lost frames at ${c.missing_frames.map((g) => g.at_s.toFixed(1) + " s").join(", ")}</span>`);
+    if (c.marks) notes.push(`${c.marks.length} mark${c.marks.length > 1 ? "s" : ""}`);
+    if (c.status && c.status !== "ok") notes.push(`<span class="warn">${c.status}</span>`);
+    const cells = [c.name, fmtTime(c.duration_s), c.frames, clock(c.first_frame), c.bytes ? fmtSize(c.bytes) : ""];
+    for (const [i, v] of cells.entries()) {
+      const td = document.createElement("td"); td.textContent = v; if (i > 0) td.className = "num"; tr.appendChild(td);
+    }
+    const n = document.createElement("td"); n.innerHTML = notes.join(" · "); tr.appendChild(n);
+    const b = document.createElement("td"); const btn = document.createElement("button");
+    btn.className = "small"; btn.textContent = "Show in Finder";
+    btn.onclick = () => call("/reveal", { name: c.name }, "POST").catch((e) => toast(e.message, true));
+    b.appendChild(btn); tr.appendChild(b);
+    tb.appendChild(tr);
+  }
+}
+
+// preview: one picture at a time, the next requested 250 ms after the last arrived
+const img = $("preview");
+let previewTimer = 0;
+function nextPicture() {
+  clearTimeout(previewTimer);
+  if (!$("live").checked || document.hidden || !status) { previewTimer = setTimeout(nextPicture, 1000); return; }
+  img.src = `/preview.jpg?w=960&t=${Date.now()}`;
+}
+img.onload = () => { $("off").style.display = "none"; previewTimer = setTimeout(nextPicture, 250); };
+img.onerror = () => { previewTimer = setTimeout(nextPicture, 1000); };
+$("live").checked = store.get("live", true);
+$("live").onchange = () => {
+  store.set("live", $("live").checked);
+  $("off").style.display = $("live").checked ? "none" : "grid";
+  if (!$("live").checked) img.removeAttribute("src");
+  nextPicture();
+};
+$("off").style.display = $("live").checked ? "none" : "grid";
+
+poll();
+loadClips();
+nextPicture();
+</script>
+</body>
+</html>
